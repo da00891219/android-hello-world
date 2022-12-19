@@ -1,0 +1,312 @@
+library identifier: 'neom-jenkins-sharedlib-terraform@feature/oci-tf-shared-lib', retriever: modernSCM([$class: 'GitSCMSource',
+   remote: 'https://github.com/NEOM-KSA/dx-neom-jenkins-sharedlib-terraform.git',
+   credentialsId: 'github_token'])
+
+library identifier: 'neom-jenkins-sharedlib-dockerbuild@master', retriever: modernSCM([$class: 'GitSCMSource',
+   remote: 'https://github.com/NEOM-KSA/dx-neom-jenkins-sharedlib-dockerbuild.git',
+   credentialsId: 'github_token'])
+
+library identifier: 'neom-jenkins-sharedlib-changelog@master', retriever: modernSCM([$class: 'GitSCMSource',
+   remote: 'https://github.com/NEOM-KSA/dx-neom-jenkins-sharedlib-changelog.git',
+   credentialsId: 'github_token'])
+
+library identifier: 'neom-jenkins-sharedlib-trufflehog_nix@master', retriever: modernSCM([$class: 'GitSCMSource',
+   remote: 'https://github.com/NEOM-KSA/dx-neom-jenkins-sharedlib-trufflehog_nix.git',
+   credentialsId: 'github_token'])
+
+library identifier: 'neom-jenkins-sharedlib-infra@main', retriever: modernSCM([$class: 'GitSCMSource',
+   remote: 'https://github.com/NEOM-KSA/dx-neom-jenkins-sharedlib-infra.git',
+   credentialsId: 'github_token'])
+
+library identifier: 'neom-jenkins-sharedlib-teams-notification@master', retriever: modernSCM([$class: 'GitSCMSource',
+   remote: 'https://github.com/NEOM-KSA/dx-neom-jenkins-sharedlib-teams-notification.git',
+   credentialsId: 'github_token'])
+
+// def skipRemainingStages = false
+def envTriggered = true
+
+pipeline {
+  agent {
+    kubernetes {
+       yaml '''
+        apiVersion: v1
+        kind: Pod
+        spec:
+          containers:
+          - name: gh-cli
+            #image: jed.ocir.io/axnfm4jb3i73/mgmt_tools/neom-fss-github-cli-tool:v0.2.0
+            image: jed.ocir.io/axnfm4jb3i73/mgmt_tools/neom-fss-github-cli-tool:v0.2.1
+            #image: jed.ocir.io/axnfm4jb3i73/github-cli-tool:latest
+            command:
+            - cat
+            tty: true
+          - name: trufflehog
+            image: jed.ocir.io/axnfm4jb3i73/trufflehog1:latest
+            command:
+            - cat
+            tty: true
+          - name: terraform
+            image: jed.ocir.io/axnfm4jb3i73/terraform-oci:latest
+            command:
+            - cat
+            tty: true
+          - name: terraform-compliance
+            image: jed.ocir.io/axnfm4jb3i73/terraform-compliance1:latest
+            command:
+            - cat
+            tty: true
+          - name: git
+            image: jed.ocir.io/axnfm4jb3i73/git1:latest
+            command:
+            - cat
+            tty: true
+          - name: ubuntu
+            image: jed.ocir.io/axnfm4jb3i73/ubuntu1:latest
+            command:
+            - cat
+            tty: true
+          - name: build
+            image: jed.ocir.io/axnfm4jb3i73/gradlejdk11:latest
+            command:
+            - cat
+            tty: true
+          - name: changelog
+            image: jed.ocir.io/axnfm4jb3i73/changlog1:latest
+            command:
+            - cat
+            tty: true
+          imagePullSecrets:
+          - name: default-secret
+        '''
+    }
+  }
+
+  environment{
+    TENANCY=credentials('tenancy_ocid')
+    USER=credentials('user_ocid')
+    FINGERPRINT=credentials('fingerprint')
+    userpat=credentials('git_token1')
+    access_key=credentials('access_key')
+    secret_key=credentials('secret_key')	
+    def projectName = 'neom-fss-infra-oci-mgmt'
+    NAMESPACE = "axnfm4jb3i73"
+    BUCKET_NAME = "fss-bld-mgmt-obs-mej1-terraform-infra-plans"
+    // webhook=credentials('MS_Teams_Webhook_url')
+    ENVIRONMENT = "bld"
+  }
+  
+  stages {
+
+    stage('clean workspace') {
+      steps {
+        cleanWs()
+      }
+    }
+
+    stage('checkout') {
+      steps {
+        checkout scm
+      }
+    }
+
+    stage('oci-authentication') {
+      steps {
+        container('terraform') {
+          script{
+            tfci.config()
+          }
+        }
+      }
+    }
+
+    stage('Pushing Environment Trigger Details') {
+      steps {
+        container('terraform') {
+          script{
+            sh "echo envTriggered: ${envTriggered} > envTriggered"
+            sh "oci os object put -ns ${NAMESPACE} -bn ${BUCKET_NAME} --name envTriggered --file envTriggered --force"
+          }
+        }
+      }
+    }
+
+    stage("git-authentication-for-tf-mods") {
+      steps {
+        script {
+          container('terraform') {
+            sh '''
+              git config --global url.https://da00891219:$userpat@github.com/.insteadOf https://github.com/
+            '''
+          }
+        } 
+      }
+    }
+
+    stage("Terraform Compliance") {
+      steps {
+        script {
+          container('terraform-compliance') {
+            tfci.config()
+            sh '''
+              git config --global url.https://da00891219:$userpat@github.com/.insteadOf https://github.com/
+            '''
+
+            sh """
+              cd '$WORKSPACE'
+              export AWS_ACCESS_KEY_ID=$access_key		
+              export AWS_SECRET_ACCESS_KEY=$secret_key
+              terraform version
+              #terraform init
+              terraform init -backend-config="access_key=${access_key}" -backend-config="secret_key=${secret_key}"
+              """
+                TEST_DIRECTORY = sh (
+                  script: "find $WORKSPACE -type d -name 'test'",
+                  returnStdout: true
+                ).trim()
+                sh """
+                  cd '$WORKSPACE'
+                  #cp main.tf var*.tf *.tfvars provider.tf $TEST_DIRECTORY/
+                  #cd '$WORKSPACE'
+                  #cd '$TEST_DIRECTORY'
+                  #rm -rf test.tf
+                  terraform init
+                  terraform plan -out tfplan
+                  #terraform-compliance --features ./ --planfile ./tfplan --no-ansi
+                """
+          }
+        }
+      }
+    }
+
+    stage('Provisioning Plan') {
+      steps {
+        container('terraform') {
+          script {
+            sh "mkdir ${WORKSPACE}/terraform_plans"
+            sh "mkdir ${WORKSPACE}/terraform_plans/data"
+            sh "mkdir ${WORKSPACE}/tf_plan_approval"
+                try {
+                  sh """
+                    cd '$WORKSPACE'
+                    export AWS_ACCESS_KEY_ID=$access_key		
+                    export AWS_SECRET_ACCESS_KEY=$secret_key
+                    terraform init
+                    terraform plan -no-color -out ${WORKSPACE}/terraform_plans/tfplan
+                    terraform show -no-color ${WORKSPACE}/terraform_plans/tfplan >> $WORKSPACE/tf_plan_approval/tfplan
+                  """
+                }
+                catch (err) {
+                  currentBuild.result = 'FAILURE'
+                  emailExtraMsg = "Build Failure:"+ err.getMessage()
+                  throw err
+                }
+              }
+            }
+          }
+    }
+
+    stage('Publish Plan for Approval') {
+      steps {
+        container('terraform') {
+          script{
+            try {
+              sh "oci os object bulk-upload -ns ${NAMESPACE} --bucket-name ${BUCKET_NAME} --src-dir ${WORKSPACE}/terraform_plans --object-prefix terraform_plans/ --overwrite"
+              sh "oci os object bulk-upload -ns ${NAMESPACE} --bucket-name ${BUCKET_NAME} --src-dir ${WORKSPACE}/tf_plan_approval --object-prefix terraform_history/tf_plan_approval_${env.CHANGE_ID}/ --overwrite"
+            }
+            catch (Exception e) {
+              error("${e}")
+            }
+          }
+        }
+      }
+    }
+
+    stage ('Create Plan Artifact') {
+      steps {
+        container('terraform'){
+          script {
+              zip zipFile: 'tf_plans_approval.zip', archive: false, dir: "${WORKSPACE}/tf_plan_approval"
+          }
+        }
+      }
+    }
+
+    stage('Provisioning Apply') {
+      steps {
+        container('terraform') {
+          script {
+            sh "oci os object get -ns ${NAMESPACE} -bn ${BUCKET_NAME} --name envTriggered --file envTriggered"
+            
+            envTriggered = readFile("envTriggered").readLines()[0]
+            
+            sh "echo envTriggered: ${envTriggered}"
+            
+            sh "oci os object bulk-download -ns ${NAMESPACE} -bn ${BUCKET_NAME} --dest-dir ${WORKSPACE} --prefix terraform_plans/ --overwrite"
+            
+            sh """
+              echo 'Terraform apply in progress...'
+              cd '$WORKSPACE'
+              export AWS_ACCESS_KEY_ID=$access_key		
+              export AWS_SECRET_ACCESS_KEY=$secret_key
+              terraform init
+              terraform apply -auto-approve -no-color ${WORKSPACE}/terraform_plans/tfplan
+            """
+            
+            // sh "oci os object bulk-delete -ns ${NAMESPACE} -bn ${BUCKET_NAME} --prefix terraform_plans/ --force"
+            
+            // sh "oci os object delete -ns ${NAMESPACE} -bn ${BUCKET_NAME} --name envTriggered --force"
+          }
+        }
+      }
+    }
+
+    // stage('destroy') {
+    //   steps {
+    //       timeout(time: 60, unit: 'SECONDS') {
+    //       input 'Do you want to proceed to the Deployment?'
+    //     }
+    //     container('terraform') {
+    //       script{
+    //         tfci.destroy()
+    //       }	
+    //     }
+    //   }
+    // }
+
+    stage('Terraform Destroy Resources') {
+      steps {
+          timeout(time: 300, unit: 'SECONDS') {
+          input 'Do you want to proceed to the Terraform Destroy?'
+        }
+        container('terraform') {
+          script {
+            sh "echo 'Terraform destroy in progress...'"
+                try {
+                  sh """
+                    cd '$WORKSPACE'
+                    #terraform init
+                    terraform init -backend-config="access_key=${access_key}" -backend-config="secret_key=${secret_key}"
+                    terraform apply -destroy -no-color -auto-approve
+                  """
+                }
+                catch (err) {
+                  currentBuild.result = 'FAILURE'
+                  emailExtraMsg = "Terraform Destroy Failure:"+ err.getMessage()
+                  throw err
+                }
+              }
+            }
+          }
+    }
+    
+    // stage('Changelog') {
+    //   steps {
+    //     script{
+    //       container('changelog') {
+    //         infraChangeLog("${version}","$BRANCH_NAME","${ENVIRONMENT}")
+    //       }
+    //     }
+    //   }
+    // }
+  }
+}
